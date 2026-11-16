@@ -693,7 +693,8 @@ class App:
             fill(hero_y, margin, art_cols, art_rows, deep)
             source = item.get('image', '')
             # Covers are shown whole; everything else fills the frame.
-            if not picture(hero_y, margin, art_cols, art_rows, 'contain' if kind in ('read', 'listen') else 'cover', source, deep):
+            hero_mode = 'contain' if kind in ('read', 'listen') else 'cover'
+            if not picture(hero_y, margin, art_cols, art_rows, hero_mode, source, deep):
                 put(hero_y + art_rows // 2, margin + max(0, (art_cols - len(item['title'])) // 2),
                     fit(item['title'], art_cols), dim, deep)
             ix = margin + art_cols + 3
