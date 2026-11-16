@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- The planner takes stopovers: `3:40, stop 1:15, 1:25`.
+
 ## 0.3.2
 
 - The trip plan is stored in the shared history file, so the desktop app shows the same flights.

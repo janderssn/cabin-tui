@@ -35,6 +35,11 @@ class Planner(unittest.TestCase):
         self.assertEqual(c.parse_legs('3:40, 1:25'), [220, 85])
         self.assertEqual(c.parse_legs('4h20 + 2h05'), [260, 125])
         self.assertIsNone(c.parse_legs('3:40, soon'))
+        self.assertEqual(c.parse_trip('3:40, stop 1:15, 1:25'), ([220, 75, 85], ['flight', 'stop', 'flight']))
+        self.assertEqual(c.parse_trip('wait 45 + 2h'), ([45, 120], ['stop', 'flight']))
+        self.assertIsNone(c.parse_trip('stop soon'))
+        self.assertEqual(c.segment_names(['stop', 'flight', 'stop', 'flight']),
+                         ['Stopover', 'Flight 1', 'Stopover', 'Flight 2'])
 
     def test_durations(self):
         for text, want in [('3:10', 190), ('3h10', 190), ('3h', 180), ('190', 190), ('45m', 45), ('soon', None)]:

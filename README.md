@@ -65,8 +65,8 @@ other compositors the window stays as the compositor leaves it.
   is marked watched.
 - **Planner.** `p`, then your time in the air such as `3:10`, gives the films
   that fit: started ones first, then favourites, then the rest. For a trip with
-  a stop, give one time per flight (`3:40, 1:25`) and no film is split across
-  the stop. The plan is kept until you make another.
+  a stop, give one time per flight and one for the wait on the ground
+  (`3:40, stop 1:15, 1:25`); no film is split between them. The plan is kept until you make another.
 - **Untested games.** Atari games whose copy was never boot-checked are hidden
   until you press `u`, so nothing surprises you in the air.
 
@@ -75,7 +75,7 @@ other compositors the window stays as the compositor leaves it.
 ```sh
 cabin-tui --check        # players installed, files present and complete
 cabin-tui --plan 3:10    # print a line-up without opening the interface
-cabin-tui --plan 3:40,1:25 --save-plan   # two flights; keep it for the Plan section
+cabin-tui --plan "3:40, stop 1:15, 1:25" --save-plan   # two flights and a stopover; keep it
 cabin-tui --list         # ids, kinds and titles
 cabin-tui --dry-run ID   # the exact command an item would run
 ```
