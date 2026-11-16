@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Per-user install: a `cabin-tui` command and an app launcher entry.
+# The command is a link to this checkout, so `git pull` updates it.
+set -euo pipefail
+repo="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+chmod +x "$repo/cabin_tui.py"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+ln -sfn "$repo/cabin_tui.py" "$HOME/.local/bin/cabin-tui"
+cat > "$HOME/.local/share/applications/cabin-tui.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Cabin TUI
+Comment=Offline flight entertainment in a terminal
+Exec=$HOME/.local/bin/cabin-tui
+Icon=cabin
+Terminal=true
+Categories=Game;AudioVideo;Viewer;
+Keywords=flight;offline;travel;games;magazines;documentaries;terminal;
+DESKTOP
+command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" || true
+echo "Installed: $HOME/.local/bin/cabin-tui"
