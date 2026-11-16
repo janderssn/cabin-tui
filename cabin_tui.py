@@ -551,7 +551,7 @@ class App:
         if SECTIONS[self.section][0] == 'plan' and len(self.legs) > 1:
             for planned, left, leg in self.plan_rows:
                 if planned['id'] == item['id']:
-                    return f'Flight {leg}  ·  {minutes(left)}'
+                    return f'Flight {leg} · {round(left / 60)} min'
         if item.get('kind') == 'watch' and item.get('seconds'):
             position, watched = self.progress.get(item['id'], (None, False))
             if watched:
