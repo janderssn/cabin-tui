@@ -47,6 +47,14 @@ class Commands(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             c.command_for({'kind': 'read', 'path': '/definitely/missing.pdf'})
 
+    def test_books_saved_as_web_pages_open_in_the_browser(self):
+        with tempfile.TemporaryDirectory() as d:
+            page, pdf = Path(d) / 'book.HTML', Path(d) / 'issue.pdf'
+            page.write_text('x')
+            pdf.write_bytes(b'x')
+            self.assertEqual(c.command_for({'kind': 'read', 'path': str(page)})[0], [c.XDG_OPEN, str(page)])
+            self.assertEqual(c.command_for({'kind': 'read', 'path': str(pdf)})[0], [c.EVINCE, str(pdf)])
+
     def test_only_puzzle_binaries_are_run(self):
         with self.assertRaises(ValueError):
             c.command_for({'kind': 'puzzles', 'path': '/usr/bin/sh'})

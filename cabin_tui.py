@@ -39,6 +39,7 @@ ATARI_ROOT = HOME / 'games/atari-st'
 
 MPV, EVINCE, HATARI = '/usr/bin/mpv', '/usr/bin/evince', '/usr/bin/hatari'
 MAGICK, FOOT, HYPRCTL = '/usr/bin/magick', '/usr/bin/foot', '/usr/bin/hyprctl'
+XDG_OPEN = '/usr/bin/xdg-open'      # for books saved as web pages
 CACHE = Path(os.environ.get('XDG_CACHE_HOME', str(HOME / '.cache'))) / 'cabin-tui'   # prepared pictures
 TITLE_FONT = '/usr/share/fonts/liberation/LiberationSans-Bold.ttf'   # falls back to fontconfig's bold sans
 MEMORY_PICTURES = 96      # prepared pictures kept in memory; the rest are re-read from the disk cache
@@ -194,6 +195,8 @@ def command_for(item, disk_index=0, joystick=False, prepare=True):
     if kind == 'listen':
         return [MPV, '--save-position-on-quit', '--no-video', '--', path], None
     if kind == 'read':
+        if path.lower().endswith(('.html', '.htm')):
+            return [XDG_OPEN, path], None
         return [EVINCE, path], None
     if kind == 'puzzles':
         name = path.removeprefix('/usr/bin/puzzles-')
@@ -346,9 +349,12 @@ class Art:
                        '-size', f'{w}x', 'caption:' + caption_text(source),
                        '-gravity', 'NorthWest', '-extent', box, 'sixel:-']
             else:
-                fit = ['-resize', box + '^'] if mode == 'cover' else ['-resize', box, '-background', bg]
+                # 'cover' fills the box and crops the overflow; 'top' does the same but keeps
+                # the top of the picture (a magazine's masthead); 'contain' shows all of it.
+                fit = ['-resize', box, '-background', bg] if mode == 'contain' else ['-resize', box + '^']
+                gravity = 'North' if mode == 'top' else 'center'
                 # The picture goes in on stdin, so its file name is never parsed by ImageMagick.
-                cmd = [MAGICK, '-[0]', *fit, '-gravity', 'center', '-extent', box, 'sixel:-']
+                cmd = [MAGICK, '-[0]', *fit, '-gravity', gravity, '-extent', box, 'sixel:-']
             try:
                 if mode != 'title':
                     stdin = open(source, 'rb')
@@ -550,7 +556,9 @@ class App:
                 else:
                     self.watched.discard(item['id'])
                 self.refresh_progress()
-            self.message = f'Closed {item["title"]}.' if code == 0 else f'{item["title"]} exited with an error; see {log_path}'
+            handed_over = cmd[0] == XDG_OPEN        # the browser keeps running after xdg-open returns
+            self.message = f'Opened {item["title"]} in your browser.' if handed_over and code == 0 else \
+                f'Closed {item["title"]}.' if code == 0 else f'{item["title"]} exited with an error; see {log_path}'
             self.save()
         except (OSError, ValueError) as exc:
             self.message = str(exc)
@@ -652,7 +660,8 @@ class App:
             art_rows = min(hero_h, max(4, int(art_cols * cw * 9 / 16 / ch)))
             fill(hero_y, margin, art_cols, art_rows, deep)
             source = item.get('image', '')
-            if not picture(hero_y, margin, art_cols, art_rows, 'cover' if kind == 'watch' else 'contain', source, deep):
+            # Covers are shown whole; everything else fills the frame.
+            if not picture(hero_y, margin, art_cols, art_rows, 'contain' if kind == 'read' else 'cover', source, deep):
                 put(hero_y + art_rows // 2, margin + max(0, (art_cols - len(item['title'])) // 2),
                     fit(item['title'], art_cols), dim, deep)
             ix = margin + art_cols + 3
@@ -756,7 +765,7 @@ class App:
             if chosen:
                 put(shelf_y - 1, x, '▄' * card_w, accent)
             fill(shelf_y, x, card_w, thumb_rows, deep)
-            mode = 'cover' if entry.get('kind') == 'watch' else 'contain'
+            mode = 'top' if entry.get('kind') == 'read' else 'cover'
             if not picture(shelf_y, x, card_w, thumb_rows, mode, entry.get('image', ''), deep):
                 put(shelf_y + thumb_rows // 2, x + 1, fit(entry['title'], card_w - 2), dim, deep)
             star = '★ ' if entry['id'] in self.favorites else ''
