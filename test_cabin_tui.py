@@ -27,6 +27,15 @@ class Planner(unittest.TestCase):
         rows, _ = c.plan([film('x', 600), film('fav', 600)], 10, {}, favorites={'fav'})
         self.assertEqual([i['id'] for i, _ in rows], ['fav'])
 
+    def test_two_flights_never_share_or_repeat_a_film(self):
+        items = [film('long', 6000), film('mid', 3000), film('short', 1200)]
+        rows, used = c.plan_legs(items, [60, 110], {})
+        self.assertEqual([(i['id'], leg) for i, _, leg in rows], [('mid', 1), ('long', 2)])
+        self.assertEqual(used, [3000, 6000])
+        self.assertEqual(c.parse_legs('3:40, 1:25'), [220, 85])
+        self.assertEqual(c.parse_legs('4h20 + 2h05'), [260, 125])
+        self.assertIsNone(c.parse_legs('3:40, soon'))
+
     def test_durations(self):
         for text, want in [('3:10', 190), ('3h10', 190), ('3h', 180), ('190', 190), ('45m', 45), ('soon', None)]:
             self.assertEqual(c.parse_duration(text), want, text)
@@ -183,6 +192,8 @@ class Interface(unittest.TestCase):
         self.keys('p', '0', ':', '4', '0', 'enter')
         self.assertEqual(c.SECTIONS[self.app.section][0], 'plan')
         self.assertEqual(self.titles(), ['Alpha'])
+        self.assertEqual(c.load_json(c.STATE, {})['plan'], [40])
+        self.assertEqual(c.App([dict(i) for i in self.ITEMS], art=False).legs, [40])
         self.keys('p', 'x', 'enter')
         self.assertIn('not a flight time', self.app.message)
 

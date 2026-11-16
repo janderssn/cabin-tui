@@ -63,8 +63,10 @@ other compositors the window stays as the compositor leaves it.
 - **Resume.** Quit mpv with `q` and the film keeps its place; the list shows
   the time left and Home puts started films first. A film that ran to the end
   is marked watched.
-- **Planner.** `p`, then a flight time such as `3:10`, gives the films that
-  fit: started ones first, then favourites, then the rest.
+- **Planner.** `p`, then your time in the air such as `3:10`, gives the films
+  that fit: started ones first, then favourites, then the rest. For a trip with
+  a stop, give one time per flight (`3:40, 1:25`) and no film is split across
+  the stop. The plan is kept until you make another.
 - **Untested games.** Atari games whose copy was never boot-checked are hidden
   until you press `u`, so nothing surprises you in the air.
 
@@ -73,6 +75,7 @@ other compositors the window stays as the compositor leaves it.
 ```sh
 cabin-tui --check        # players installed, files present and complete
 cabin-tui --plan 3:10    # print a line-up without opening the interface
+cabin-tui --plan 3:40,1:25 --save-plan   # two flights; keep it for the Plan section
 cabin-tui --list         # ids, kinds and titles
 cabin-tui --dry-run ID   # the exact command an item would run
 ```
@@ -86,7 +89,7 @@ or a download was left unfinished (`*.part`).
 | --- | --- |
 | `~/.local/share/cabin/library.json` | Catalogue, written by Cabin's preparation scripts (`CABIN_LIBRARY` overrides it) |
 | `~/.local/state/cabin/history.json` | Favourites and recent items, shared with the desktop app |
-| `~/.local/state/cabin-tui/state.json` | Watched films and the untested-games setting |
+| `~/.local/state/cabin-tui/state.json` | Watched films, the saved plan and the untested-games setting |
 | `~/.local/state/mpv/watch_later/` | mpv's resume positions, read for progress |
 | `~/.cache/cabin-tui/` | Pictures prepared for the terminal; safe to delete |
 | `~/.local/state/atari-games/` | Writable copies of the Atari disks; the originals are never changed |

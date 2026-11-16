@@ -26,7 +26,7 @@ import threading
 import time
 import tty
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 HOME = Path.home()
 XDG_STATE = Path(os.environ.get('XDG_STATE_HOME', str(HOME / '.local/state')))
@@ -261,6 +261,27 @@ def plan(items, total_minutes, progress, favorites=()):
     return chosen, used
 
 
+def plan_legs(items, legs, progress, favorites=()):
+    """A line-up for a trip of several flights: no film is split across two legs.
+
+    `legs` is minutes per leg. Returns (rows [(item, seconds to watch, leg number)],
+    seconds used per leg).
+    """
+    rows, used, taken = [], [], set()
+    for number, leg in enumerate(legs, 1):
+        chosen, seconds = plan([i for i in items if i['id'] not in taken], leg, progress, favorites)
+        rows += [(item, left, number) for item, left in chosen]
+        taken |= {item['id'] for item, _ in chosen}
+        used.append(seconds)
+    return rows, used
+
+
+def parse_legs(text):
+    """'4:20, 2:05' or '4h20 + 2h05' -> [260, 125]; None if any part makes no sense."""
+    legs = [parse_duration(part) for part in re.split(r'[,+]', text) if part.strip()]
+    return legs if legs and all(leg and leg > 0 for leg in legs) else None
+
+
 def parse_duration(text):
     """'3:10', '3h10', '3h' or '190' -> minutes; None if it makes no sense."""
     text = text.strip().lower().replace(' ', '')
@@ -462,10 +483,14 @@ class App:
         self.section, self.selected, self.top = 0, 0, 0
         self.query, self.topic, self.mode, self.entry = '', '', '', ''
         self.disk_index, self.joystick = 0, False
-        self.plan_minutes, self.plan_rows, self.plan_used = 0, [], 0
+        self.legs, self.plan_rows, self.plan_used = [], [], []
         self.message, self.help = '', False
         self.want_art, self.art, self.theme = art, None, load_theme()
         self.refresh_progress()
+        saved = state.get('plan', [])
+        if isinstance(saved, list) and saved and all(isinstance(leg, int) and leg > 0 for leg in saved):
+            self.legs = saved
+            self.plan_rows, self.plan_used = plan_legs(self.items, saved, self.progress, self.favorites)
 
     # -- state
 
@@ -484,7 +509,8 @@ class App:
             history['favorites'] = sorted(self.favorites)
             history['recent'] = self.recent[:24]
             save_json(HISTORY, history)
-            save_json(STATE, {'watched': sorted(self.watched), 'show_untested': self.show_untested})
+            save_json(STATE, {'watched': sorted(self.watched), 'show_untested': self.show_untested,
+                              'plan': self.legs})
         except OSError as exc:
             self.message = f'Could not save: {exc}'
 
@@ -498,7 +524,7 @@ class App:
     def visible(self):
         key = SECTIONS[self.section][0]
         if key == 'plan':
-            return [item for item, _ in self.plan_rows]
+            return [item for item, _, _ in self.plan_rows]
         rows = [i for i in self.items if self.show_untested or i.get('kind') != 'atari' or i.get('verified')]
         if key == 'home' and self.query:
             pass                                    # a search from Home covers everything
@@ -522,6 +548,10 @@ class App:
 
     def status(self, item):
         """Short second line of a card: progress for films, size for the rest."""
+        if SECTIONS[self.section][0] == 'plan' and len(self.legs) > 1:
+            for planned, left, leg in self.plan_rows:
+                if planned['id'] == item['id']:
+                    return f'Flight {leg}  ·  {minutes(left)}'
         if item.get('kind') == 'watch' and item.get('seconds'):
             position, watched = self.progress.get(item['id'], (None, False))
             if watched:
@@ -563,10 +593,11 @@ class App:
         except (OSError, ValueError) as exc:
             self.message = str(exc)
 
-    def make_plan(self, total):
-        self.plan_minutes = total
-        self.plan_rows, self.plan_used = plan(self.items, total, self.progress, self.favorites)
+    def make_plan(self, legs):
+        self.legs = list(legs)
+        self.plan_rows, self.plan_used = plan_legs(self.items, self.legs, self.progress, self.favorites)
         self.section, self.selected = [k for k, _ in SECTIONS].index('plan'), 0
+        self.save()
 
     # -- drawing
 
@@ -732,7 +763,7 @@ class App:
         elif not item:
             empty = {'favorites': 'Press f on anything to keep it here.',
                      'recent': 'What you open will appear here.',
-                     'plan': 'Press p and enter your flight time to get a line-up that fits.'}.get(key, 'Nothing matches.')
+                     'plan': 'Press p and enter your time in the air to get a line-up that fits.'}.get(key, 'Nothing matches.')
             put(hero_y + 3, margin, empty, bright, bold=True)
 
         # Shelf heading with whatever is filtering it.
@@ -742,8 +773,10 @@ class App:
             bits.append('Search: ' + (self.entry if typing else self.query) + ('▏' if typing else ''))
         if self.topic:
             bits.append('Topic: ' + self.topic)
-        if key == 'plan' and self.plan_minutes:
-            bits.append(f'{minutes(self.plan_used)} of films for a {minutes(self.plan_minutes * 60)} flight')
+        if key == 'plan':
+            for number, (leg, used) in enumerate(zip(self.legs, self.plan_used, strict=False), 1):
+                name = f'Flight {number}: ' if len(self.legs) > 1 else ''
+                bits.append(f'{name}{minutes(used)} of films for {minutes(leg * 60)}')
         if key == 'atari' and self.hidden_untested():
             bits.append(f'{self.hidden_untested()} untested hidden (u)')
         put(shelf_y - 2, margin, fit('   ·   '.join(bits), W - 2 * margin - 12), bright, bold=True)
@@ -779,7 +812,7 @@ class App:
 
         # Footer: one line for a prompt or message, else the keys.
         if self.mode == 'plan':
-            put(H - 1, margin, 'Flight time (3:10, 3h10 or 190): ' + self.entry + '▏', bright, bold=True)
+            put(H - 1, margin, 'Time in the air, one per flight (3:10 or 3:40, 1:25): ' + self.entry + '▏', bright, bold=True)
         elif self.mode == 'search':
             put(H - 1, margin, 'Type to search     Enter keep     Esc clear', dim)
         elif self.message:
@@ -822,9 +855,9 @@ class App:
                 if mode == 'search':
                     self.query = self.entry
                 else:
-                    total = parse_duration(self.entry)
-                    if total and total > 0:
-                        self.make_plan(total)
+                    legs = parse_legs(self.entry)
+                    if legs:
+                        self.make_plan(legs)
                     else:
                         self.message = 'That is not a flight time.'
             elif key == 'esc':
@@ -983,7 +1016,8 @@ def main(argv=None):
     parser.add_argument('--no-art', action='store_true', help='text only, no pictures')
     parser.add_argument('--list', action='store_true', help='list the catalogue')
     parser.add_argument('--check', action='store_true', help='check players and files before a flight')
-    parser.add_argument('--plan', metavar='TIME', help='print a line-up for a flight, e.g. 3:10')
+    parser.add_argument('--plan', metavar='TIME', help='print a line-up for a flight, e.g. 3:10, or 3:40,1:25 for two')
+    parser.add_argument('--save-plan', action='store_true', help='with --plan: keep it, so the Plan section opens with it')
     parser.add_argument('--dry-run', metavar='ID', help='print the command an item would run')
     args = parser.parse_args(argv)
     if args.window:
@@ -1003,14 +1037,19 @@ def main(argv=None):
         print(f'{len(items)} items, {len(problems)} problem(s), {untested} Atari games not boot-tested')
         raise SystemExit(1 if problems else 0)
     elif args.plan:
-        total = parse_duration(args.plan)
-        if not total or total <= 0:
-            parser.error('TIME looks like 3:10, 3h10 or 190')
+        legs = parse_legs(args.plan)
+        if not legs:
+            parser.error('TIME looks like 3:10, 3h10 or 190; separate several flights with commas')
         app = App(items)
-        rows, used = plan(items, total, app.progress, app.favorites)
-        for item, left in rows:
-            print(f'{minutes(left):>12}  {item["title"]}')
-        print(f'{minutes(used):>12}  of films for a {minutes(total * 60)} flight')
+        rows, used = plan_legs(items, legs, app.progress, app.favorites)
+        for number, (leg, seconds) in enumerate(zip(legs, used, strict=True), 1):
+            print(f'Flight {number}: {minutes(seconds)} of films for {minutes(leg * 60)}')
+            for item, left, row_leg in rows:
+                if row_leg == number:
+                    print(f'{minutes(left):>12}  {item["title"]}')
+        if args.save_plan:
+            app.legs = legs
+            app.save()
     elif args.dry_run:
         item = next((i for i in items if i['id'] == args.dry_run), None)
         if not item:

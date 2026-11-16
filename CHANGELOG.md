@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- The planner takes one time per flight for trips with a stop, and remembers the plan.
+- Card pictures fill their frame; magazine covers keep their top.
+- Books saved as web pages open in the browser.
+
 ## 0.2.0
 
 - Big-screen view: artwork for the selected item, large titles and a shelf of picture cards.
