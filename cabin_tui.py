@@ -26,7 +26,7 @@ import threading
 import time
 import tty
 
-__version__ = '0.3.3'
+__version__ = '0.3.4'
 
 HOME = Path.home()
 XDG_STATE = Path(os.environ.get('XDG_STATE_HOME', str(HOME / '.local/state')))
@@ -40,6 +40,7 @@ ATARI_ROOT = HOME / 'games/atari-st'
 MPV, EVINCE, HATARI = '/usr/bin/mpv', '/usr/bin/evince', '/usr/bin/hatari'
 MAGICK, FOOT, HYPRCTL = '/usr/bin/magick', '/usr/bin/foot', '/usr/bin/hyprctl'
 XDG_OPEN = '/usr/bin/xdg-open'      # for books saved as web pages
+CABIN = str(HOME / '.local/bin/cabin')   # the desktop app, whose reader suits scanned magazines
 CACHE = Path(os.environ.get('XDG_CACHE_HOME', str(HOME / '.cache'))) / 'cabin-tui'   # prepared pictures
 TITLE_FONT = '/usr/share/fonts/liberation/LiberationSans-Bold.ttf'   # falls back to fontconfig's bold sans
 MEMORY_PICTURES = 96      # prepared pictures kept in memory; the rest are re-read from the disk cache
@@ -198,6 +199,9 @@ def command_for(item, disk_index=0, joystick=False, prepare=True):
     if kind == 'read':
         if path.lower().endswith(('.html', '.htm')):
             return [XDG_OPEN, path], None
+        # The desktop app's reader shows a page at a readable width; Evince shows scans tiny.
+        if Path(CABIN).is_file() and item.get('id'):
+            return [CABIN, '--read', str(item['id'])], None
         return [EVINCE, path], None
     if kind == 'puzzles':
         name = path.removeprefix('/usr/bin/puzzles-')

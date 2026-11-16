@@ -67,7 +67,11 @@ class Commands(unittest.TestCase):
             page.write_text('x')
             pdf.write_bytes(b'x')
             self.assertEqual(c.command_for({'kind': 'read', 'path': str(page)})[0], [c.XDG_OPEN, str(page)])
+            c.CABIN = str(Path(d) / 'no-cabin')
             self.assertEqual(c.command_for({'kind': 'read', 'path': str(pdf)})[0], [c.EVINCE, str(pdf)])
+            Path(c.CABIN).write_text('')
+            self.assertEqual(c.command_for({'id': 'mag', 'kind': 'read', 'path': str(pdf)})[0],
+                             [c.CABIN, '--read', 'mag'])
 
     def test_only_puzzle_binaries_are_run(self):
         with self.assertRaises(ValueError):

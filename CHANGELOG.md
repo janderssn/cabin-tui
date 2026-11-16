@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- Magazines open in the Cabin desktop app's reader when it is installed.
+
 ## 0.3.3
 
 - The planner takes stopovers: `3:40, stop 1:15, 1:25`.
