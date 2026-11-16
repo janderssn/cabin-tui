@@ -4,8 +4,8 @@
 
 Offline flight entertainment in a terminal, laid out like a console's big-screen
 mode: full-screen, large type, artwork for whatever is selected and a shelf of
-cards to browse with the arrow keys. Films, magazines, puzzles and Atari ST
-games in one place.
+cards to browse with the arrow keys. Films, audio, magazines, puzzles and
+Atari ST games in one place.
 
 It is a front end only: you bring the films, magazines and games, and describe
 them in a JSON [catalogue](#catalogue). It was written as a companion to a

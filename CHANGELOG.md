@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Listen shelf for music, podcasts and audiobooks.
+
 ## 0.3.0
 
 - The planner takes one time per flight for trips with a stop, and remembers the plan.

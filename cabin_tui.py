@@ -26,7 +26,7 @@ import threading
 import time
 import tty
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 HOME = Path.home()
 XDG_STATE = Path(os.environ.get('XDG_STATE_HOME', str(HOME / '.local/state')))
@@ -50,7 +50,7 @@ PLAYERS = {'watch': MPV, 'listen': MPV, 'read': EVINCE, 'atari': HATARI}
 MPV_ARGS = ['--save-position-on-quit', '--hwdec=auto-safe', '--af=dynaudnorm',
             '--sub-auto=fuzzy', '--slang=en,eng']
 
-SECTIONS = [('home', 'Home'), ('watch', 'Watch'), ('read', 'Read'), ('puzzles', 'Puzzles'),
+SECTIONS = [('home', 'Home'), ('watch', 'Watch'), ('listen', 'Listen'), ('read', 'Read'), ('puzzles', 'Puzzles'),
             ('atari', 'Atari'), ('favorites', 'Favorites'), ('recent', 'Recent'), ('plan', 'Plan')]
 
 HELP = [
@@ -193,7 +193,8 @@ def command_for(item, disk_index=0, joystick=False, prepare=True):
     if kind == 'watch':
         return [MPV, *MPV_ARGS, '--fs', '--', path], None
     if kind == 'listen':
-        return [MPV, '--save-position-on-quit', '--no-video', '--', path], None
+        # A small window gives the audio its controls; q there keeps the place.
+        return [MPV, '--no-video', '--force-window=yes', '--save-position-on-quit', '--af=dynaudnorm', '--', path], None
     if kind == 'read':
         if path.lower().endswith(('.html', '.htm')):
             return [XDG_OPEN, path], None
@@ -529,10 +530,10 @@ class App:
         if key == 'home' and self.query:
             pass                                    # a search from Home covers everything
         elif key == 'home':
-            # Films you started, then unwatched films, then things to read or hear.
+            # Films you started, then unwatched films, then things to read. Audio has its own shelf.
             started = [i for i in rows if self.progress.get(i['id'], (None,))[0]]
             rest = [i for i in rows if i not in started and i['id'] not in self.watched]
-            rows = started + [i for kind in ('watch', 'read', 'listen') for i in rest if i.get('kind') == kind]
+            rows = started + [i for kind in ('watch', 'read') for i in rest if i.get('kind') == kind]
         elif key == 'favorites':
             rows = [i for i in rows if i['id'] in self.favorites]
         elif key == 'recent':
@@ -692,7 +693,7 @@ class App:
             fill(hero_y, margin, art_cols, art_rows, deep)
             source = item.get('image', '')
             # Covers are shown whole; everything else fills the frame.
-            if not picture(hero_y, margin, art_cols, art_rows, 'contain' if kind == 'read' else 'cover', source, deep):
+            if not picture(hero_y, margin, art_cols, art_rows, 'contain' if kind in ('read', 'listen') else 'cover', source, deep):
                 put(hero_y + art_rows // 2, margin + max(0, (art_cols - len(item['title'])) // 2),
                     fit(item['title'], art_cols), dim, deep)
             ix = margin + art_cols + 3
@@ -742,7 +743,7 @@ class App:
                 notes.append('Joystick on arrow keys + right Ctrl: ' + ('on' if self.joystick else 'off') + '  (J)')
                 notes += [str(item.get('notes', ''))] if item.get('notes') else []
                 notes.append('In Hatari: F12 settings, Right Alt+M frees the mouse.')
-            elif kind == 'watch':
+            elif kind in ('watch', 'listen'):
                 notes.append('Space pauses, arrows seek, q quits and keeps your place.')
             bottom = hero_y + hero_h
             note_lines = [line for note in notes for line in textwrap.wrap(note, iw)]
@@ -798,7 +799,7 @@ class App:
             if chosen:
                 put(shelf_y - 1, x, '▄' * card_w, accent)
             fill(shelf_y, x, card_w, thumb_rows, deep)
-            mode = 'top' if entry.get('kind') == 'read' else 'cover'
+            mode = {'read': 'top', 'listen': 'contain'}.get(entry.get('kind'), 'cover')
             if not picture(shelf_y, x, card_w, thumb_rows, mode, entry.get('image', ''), deep):
                 put(shelf_y + thumb_rows // 2, x + 1, fit(entry['title'], card_w - 2), dim, deep)
             star = '★ ' if entry['id'] in self.favorites else ''
