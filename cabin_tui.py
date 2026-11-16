@@ -26,7 +26,7 @@ import threading
 import time
 import tty
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'
 
 HOME = Path.home()
 XDG_STATE = Path(os.environ.get('XDG_STATE_HOME', str(HOME / '.local/state')))
@@ -488,7 +488,8 @@ class App:
         self.message, self.help = '', False
         self.want_art, self.art, self.theme = art, None, load_theme()
         self.refresh_progress()
-        saved = state.get('plan', [])
+        # The plan lives in the history file, so the desktop app shows the same trip.
+        saved = history.get('plan') or state.get('plan', [])
         if isinstance(saved, list) and saved and all(isinstance(leg, int) and leg > 0 for leg in saved):
             self.legs = saved
             self.plan_rows, self.plan_used = plan_legs(self.items, saved, self.progress, self.favorites)
@@ -509,9 +510,9 @@ class App:
             history = load_json(HISTORY, {})
             history['favorites'] = sorted(self.favorites)
             history['recent'] = self.recent[:24]
+            history['plan'] = self.legs
             save_json(HISTORY, history)
-            save_json(STATE, {'watched': sorted(self.watched), 'show_untested': self.show_untested,
-                              'plan': self.legs})
+            save_json(STATE, {'watched': sorted(self.watched), 'show_untested': self.show_untested})
         except OSError as exc:
             self.message = f'Could not save: {exc}'
 

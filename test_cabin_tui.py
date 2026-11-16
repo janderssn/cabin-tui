@@ -192,7 +192,7 @@ class Interface(unittest.TestCase):
         self.keys('p', '0', ':', '4', '0', 'enter')
         self.assertEqual(c.SECTIONS[self.app.section][0], 'plan')
         self.assertEqual(self.titles(), ['Alpha'])
-        self.assertEqual(c.load_json(c.STATE, {})['plan'], [40])
+        self.assertEqual(c.load_json(c.HISTORY, {})['plan'], [40])
         self.assertEqual(c.App([dict(i) for i in self.ITEMS], art=False).legs, [40])
         self.keys('p', 'x', 'enter')
         self.assertIn('not a flight time', self.app.message)

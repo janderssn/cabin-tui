@@ -88,8 +88,8 @@ or a download was left unfinished (`*.part`).
 | Path | What |
 | --- | --- |
 | `~/.local/share/cabin/library.json` | Catalogue, written by Cabin's preparation scripts (`CABIN_LIBRARY` overrides it) |
-| `~/.local/state/cabin/history.json` | Favourites and recent items, shared with the desktop app |
-| `~/.local/state/cabin-tui/state.json` | Watched films, the saved plan and the untested-games setting |
+| `~/.local/state/cabin/history.json` | Favourites, recent items and the trip plan, shared with the desktop app |
+| `~/.local/state/cabin-tui/state.json` | Watched films and the untested-games setting |
 | `~/.local/state/mpv/watch_later/` | mpv's resume positions, read for progress |
 | `~/.cache/cabin-tui/` | Pictures prepared for the terminal; safe to delete |
 | `~/.local/state/atari-games/` | Writable copies of the Atari disks; the originals are never changed |

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- The trip plan is stored in the shared history file, so the desktop app shows the same flights.
+
 ## 0.3.1
 
 - Listen shelf for music, podcasts and audiobooks.
