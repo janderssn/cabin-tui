@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Cabin TUI: offline flight entertainment in a terminal.
 
-A big-screen view: artwork, large titles and a shelf of cards. Reads the catalogue the Cabin desktop app uses and opens films in mpv,
+A big-screen view: artwork, large titles and a shelf of cards. It reads a JSON
+catalogue (the one the Cabin desktop app uses) and opens films in mpv,
 magazines in Evince, puzzles natively and Atari ST games in Hatari.
 Python standard library only; nothing here touches the network.
 """
@@ -25,6 +26,8 @@ import threading
 import time
 import tty
 
+__version__ = '0.2.0'
+
 HOME = Path.home()
 XDG_STATE = Path(os.environ.get('XDG_STATE_HOME', str(HOME / '.local/state')))
 LIBRARY = Path(os.environ.get('CABIN_LIBRARY', str(HOME / '.local/share/cabin/library.json')))
@@ -35,9 +38,10 @@ WATCH_LATER = [XDG_STATE / 'mpv' / 'watch_later', HOME / '.config/mpv/watch_late
 ATARI_ROOT = HOME / 'games/atari-st'
 
 MPV, EVINCE, HATARI = '/usr/bin/mpv', '/usr/bin/evince', '/usr/bin/hatari'
-MAGICK, FOOT = '/usr/bin/magick', '/usr/bin/foot'
+MAGICK, FOOT, HYPRCTL = '/usr/bin/magick', '/usr/bin/foot', '/usr/bin/hyprctl'
 CACHE = Path(os.environ.get('XDG_CACHE_HOME', str(HOME / '.cache'))) / 'cabin-tui'   # prepared pictures
-TITLE_FONT = '/usr/share/fonts/liberation/LiberationSans-Bold.ttf'
+TITLE_FONT = '/usr/share/fonts/liberation/LiberationSans-Bold.ttf'   # falls back to fontconfig's bold sans
+MEMORY_PICTURES = 96      # prepared pictures kept in memory; the rest are re-read from the disk cache
 PLAYERS = {'watch': MPV, 'listen': MPV, 'read': EVINCE, 'atari': HATARI}
 
 # Hardware decoding saves battery; levelled audio and subtitles help over
@@ -111,12 +115,11 @@ def battery():
     """(percent, status, hours left or None), or None on a machine without one."""
     for bat in sorted(Path('/sys/class/power_supply').glob('BAT*')):
         try:
-            read = lambda name: (bat / name).read_text().strip()
-            percent, status, hours = int(read('capacity')), read('status'), None
+            percent, status, hours = int((bat / 'capacity').read_text()), (bat / 'status').read_text().strip(), None
             try:
-                power = int(read('power_now'))
+                power = int((bat / 'power_now').read_text())
                 if status == 'Discharging' and power > 0:
-                    hours = int(read('energy_now')) / power
+                    hours = int((bat / 'energy_now').read_text()) / power
             except (OSError, ValueError):
                 pass
             return percent, status, hours
@@ -155,7 +158,7 @@ def atari_command(item, disk_index=0, joystick=False, prepare=True):
     if prepare:
         work.mkdir(parents=True, exist_ok=True)
         # Play on persistent copies so saves never alter the archived images.
-        for source, dest in zip(sources, disks):
+        for source, dest in zip(sources, disks, strict=True):
             if not dest.exists():
                 shutil.copy2(source, dest)
         if not config.exists():
@@ -270,16 +273,21 @@ def parse_duration(text):
 
 # ------------------------------------------------------------------ artwork
 
-def sixel_size(data):
-    """(width, height) in pixels from a sixel image's raster attributes, or None."""
-    match = re.search(rb'"\d+;\d+;(\d+);(\d+)', data[:200])
-    return (int(match.group(1)), int(match.group(2))) if match else None
-
-
 def caption_text(text):
     """Make a title safe for ImageMagick's caption: (no file reads, no % escapes)."""
     text = text.replace('\\', '\\\\').replace('%', '%%')
     return '\\' + text if text.startswith('@') else text
+
+
+def title_font():
+    """A bold sans font file for the large titles, or None to leave the choice to ImageMagick."""
+    if Path(TITLE_FONT).is_file():
+        return TITLE_FONT
+    try:
+        found = subprocess.run(['fc-match', '-f', '%{file}', 'sans:bold'], capture_output=True, text=True, timeout=5)
+        return found.stdout.strip() if found.returncode == 0 and Path(found.stdout.strip()).is_file() else None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 class Art:
@@ -291,7 +299,7 @@ class Art:
     def __init__(self, wake, enabled=True):
         self.enabled = enabled and Path(MAGICK).is_file()
         self.wake, self.ready, self.pending, self.failed = wake, {}, set(), set()
-        self.jobs = queue.Queue()
+        self.jobs, self.font = queue.Queue(), title_font()
         if self.enabled:
             for _ in range(3):
                 threading.Thread(target=self.work, daemon=True).start()
@@ -308,12 +316,13 @@ class Art:
                 return None
         key = hashlib.sha1(repr((mode, source, stamp, w, h, bg, fg, size)).encode()).hexdigest()
         if key in self.ready:
+            self.ready[key] = self.ready.pop(key)       # most recently used goes last
             return self.ready[key]
         if key in self.failed:
             return None
         cached = CACHE / (key + '.six')
         try:
-            self.ready[key] = cached.read_bytes()
+            self.keep(key, cached.read_bytes())
             return self.ready[key]
         except OSError:
             pass
@@ -322,12 +331,18 @@ class Art:
             self.jobs.put((key, mode, source, w, h, bg, fg, size))
         return None
 
+    def keep(self, key, data):
+        self.ready[key] = data
+        while len(self.ready) > MEMORY_PICTURES:
+            self.ready.pop(next(iter(self.ready)), None)
+
     def work(self):
         while True:
             key, mode, source, w, h, bg, fg, size = self.jobs.get()
             box, data, stdin = f'{w}x{h}', None, None
             if mode == 'title':
-                cmd = [MAGICK, '-background', bg, '-fill', fg, '-font', TITLE_FONT, '-pointsize', str(size),
+                font = ['-font', self.font] if self.font else []
+                cmd = [MAGICK, '-background', bg, '-fill', fg, *font, '-pointsize', str(size),
                        '-size', f'{w}x', 'caption:' + caption_text(source),
                        '-gravity', 'NorthWest', '-extent', box, 'sixel:-']
             else:
@@ -350,7 +365,7 @@ class Art:
                 if stdin:
                     stdin.close()
             if data:
-                self.ready[key] = data
+                self.keep(key, data)
             else:
                 self.failed.add(key)
             self.pending.discard(key)
@@ -523,6 +538,10 @@ class App:
                 self.draw(out)
             with log_path.open('a') as log:
                 code = subprocess.run(cmd, cwd=work, stdin=subprocess.DEVNULL, stdout=log, stderr=log).returncode
+            if out:
+                # Keys pressed while the other app was open are not meant for Cabin.
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                restore_window()
             self.recent = [item['id']] + [r for r in self.recent if r != item['id']]
             if item.get('kind') == 'watch':
                 # mpv keeps a resume file unless the film ran to its end.
@@ -589,7 +608,8 @@ class App:
 
         buf.append('\x1b[?2026h' + colour(text) + '\x1b[2J')
         if W < 80 or H < 24:
-            put(1, 2, 'Cabin needs a larger window (80 x 24).', bright, bold=True)
+            put(1, 2, 'Cabin needs more room.', bright, bold=True)
+            put(2, 2, 'At least 80 x 24.', dim)
             out.write(''.join(buf) + '\x1b[?2026l')
             out.flush()
             return
@@ -709,7 +729,8 @@ class App:
         # Shelf heading with whatever is filtering it.
         bits = [label.upper()]
         if self.query or self.mode == 'search':
-            bits.append('Search: ' + (self.entry if self.mode == 'search' else self.query) + ('▏' if self.mode == 'search' else ''))
+            typing = self.mode == 'search'
+            bits.append('Search: ' + (self.entry if typing else self.query) + ('▏' if typing else ''))
         if self.topic:
             bits.append('Topic: ' + self.topic)
         if key == 'plan' and self.plan_minutes:
@@ -878,7 +899,14 @@ class App:
         wake_r, wake_w = os.pipe()
         os.set_blocking(wake_w, False)
         saved = termios.tcgetattr(fd)
-        signal.signal(signal.SIGWINCH, lambda *_: os.write(wake_w, b'x'))
+
+        def resized(*_):
+            try:
+                os.write(wake_w, b'x')
+            except OSError:
+                pass
+
+        signal.signal(signal.SIGWINCH, resized)
         try:
             tty.setcbreak(fd)
             out.write('\x1b[?1049h\x1b[?25l\x1b[c')      # own screen, no cursor, ask what the terminal can do
@@ -907,11 +935,33 @@ class App:
             out.flush()
 
 
+def restore_window():
+    """Give Cabin's own window focus and fullscreen back after another app closes.
+
+    Hyprland takes a window out of fullscreen when another opens beside it. Only
+    our own window is addressed, and only when Cabin opened it (--window).
+    """
+    if not os.environ.get('CABIN_TUI_WINDOW') or not Path(HYPRCTL).is_file():
+        return
+    try:
+        listed = subprocess.run([HYPRCTL, 'clients', '-j'], capture_output=True, timeout=3)
+        ours = [c for c in json.loads(listed.stdout) if c.get('class') == 'cabin-tui' and c.get('pid') == os.getppid()]
+        if not ours:
+            return
+        window = 'window="address:%s"' % re.sub(r'[^0-9a-fx]', '', str(ours[0].get('address', '')))
+        for call in (f'hl.dsp.focus({{{window}}})',
+                     f'hl.dsp.window.fullscreen({{mode="fullscreen",action="set",{window}}})'):
+            subprocess.run([HYPRCTL, 'dispatch', call], capture_output=True, timeout=3)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
 def open_window():
     """Reopen Cabin in its own fullscreen terminal with large type."""
     if not Path(FOOT).is_file():
         raise SystemExit('The big-screen window needs the foot terminal; run cabin-tui in any terminal instead.')
     size = os.environ.get('CABIN_TUI_FONT_SIZE', '15')
+    os.environ['CABIN_TUI_WINDOW'] = '1'
     os.execv(FOOT, [FOOT, '--app-id=cabin-tui', '--title=Cabin', '--fullscreen',
                     f'--font=monospace:size={size}', '--override=pad=0x0',
                     sys.executable, str(Path(__file__).resolve())])
@@ -919,6 +969,7 @@ def open_window():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='cabin-tui', description=__doc__.splitlines()[0])
+    parser.add_argument('--version', action='version', version=f'cabin-tui {__version__}')
     parser.add_argument('--window', action='store_true', help='open in its own fullscreen window with large type')
     parser.add_argument('--no-art', action='store_true', help='text only, no pictures')
     parser.add_argument('--list', action='store_true', help='list the catalogue')
@@ -931,7 +982,7 @@ def main(argv=None):
     try:
         items = load_library()
     except (OSError, ValueError) as exc:
-        raise SystemExit(f'Cannot read the catalogue {LIBRARY}: {exc}')
+        raise SystemExit(f'Cannot read the catalogue {LIBRARY}: {exc}') from None
     if args.list:
         for item in items:
             print(f'{item["id"]:<34} {item.get("kind", ""):<8} {item["title"]}')
@@ -958,7 +1009,7 @@ def main(argv=None):
         try:
             print(json.dumps(command_for(item, prepare=False)[0]))
         except (OSError, ValueError) as exc:
-            raise SystemExit(str(exc))
+            raise SystemExit(str(exc)) from None
     elif not (sys.stdin.isatty() and sys.stdout.isatty()):
         parser.error('Run cabin-tui in a terminal')
     else:

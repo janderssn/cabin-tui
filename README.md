@@ -7,10 +7,11 @@ mode: full-screen, large type, artwork for whatever is selected and a shelf of
 cards to browse with the arrow keys. Films, magazines, puzzles and Atari ST
 games in one place.
 
-It grew out of the `atari-games` launcher and is a second front end to the
-[Cabin](../cabin) desktop app: it reads the same catalogue and shares its
-favourites and recent list. Python standard library only; nothing in it uses
-the network.
+It is a front end only: you bring the films, magazines and games, and describe
+them in a JSON [catalogue](#catalogue). It was written as a companion to a
+desktop app called Cabin and reads the same catalogue, so the two share
+favourites and the recent list. Python standard library only; nothing in it
+uses the network.
 
 ## Install and run
 
@@ -20,13 +21,20 @@ cabin-tui --window   # its own fullscreen window with large type (what the launc
 cabin-tui            # in the terminal you are already in
 ```
 
-Needs Python 3.10 or later and, for what you actually open, `mpv`, `evince`,
-`hatari` and Simon Tatham's `puzzles`.
+Needs Linux and Python 3.10 or later, with no Python packages to install. What
+you open needs its player: `mpv` for films, `evince` for magazines, `hatari`
+for Atari ST games and Simon Tatham's `puzzles`. Players are run from
+`/usr/bin`, which is where Arch Linux puts them; the app was built and tested
+on Omarchy (Arch, Hyprland).
 
 Pictures and the large titles need a terminal that draws sixel images (foot
 does) and ImageMagick. Without them, or with `--no-art`, the same layout shows
 text only. `--window` uses foot; set `CABIN_TUI_FONT_SIZE` (default 15) to
 change how large everything is. Colours follow the current Omarchy theme.
+
+On Hyprland, opening a film or game takes Cabin's window out of fullscreen;
+Cabin puts its own window back in fullscreen and focus when you return. On
+other compositors the window stays as the compositor leaves it.
 
 ## Keys
 
@@ -83,8 +91,30 @@ or a download was left unfinished (`*.part`).
 | `~/.cache/cabin-tui/` | Pictures prepared for the terminal; safe to delete |
 | `~/.local/state/atari-games/` | Writable copies of the Atari disks; the originals are never changed |
 
+## Catalogue
+
+The catalogue is one JSON file, a list of items, at
+`~/.local/share/cabin/library.json` (or wherever `CABIN_LIBRARY` points).
+[`examples/library.json`](examples/library.json) has one item of each kind.
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `title` | Required. The id must be unique |
+| `kind` | `watch`, `read`, `puzzles`, `atari` or `listen`; decides the section and the player |
+| `path` | The file to open. For `puzzles` it must be `/usr/bin/puzzles-NAME` |
+| `image` | Artwork: a JPEG or PNG, any size |
+| `subtitle`, `description`, `tag` | Shown next to the artwork; `tag` is also the topic filter |
+| `meta` | Short label on the card, such as `29 min` or `56 pages` |
+| `seconds` | Length of a film, for progress and the planner |
+| `bytes` | File size, shown as MB |
+| `disks`, `rom`, `folder` | Atari only: disk images in boot order, the TOS ROM, and a folder name for the writable copies |
+| `verified`, `notes` | Atari only: whether this copy was boot-tested, and anything to know at the boot menu |
+
+Paths are passed to the players as single arguments, never through a shell.
+
 ## Tests
 
 ```sh
 python3 -m unittest
+ruff check .
 ```

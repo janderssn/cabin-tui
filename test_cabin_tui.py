@@ -101,9 +101,6 @@ class Terminal(unittest.TestCase):
         self.assertEqual(c.caption_text('@/etc/passwd'), '\\@/etc/passwd')
         self.assertEqual(c.caption_text('100% Pure'), '100%% Pure')
 
-    def test_sixel_size_is_read_from_the_header(self):
-        self.assertEqual(c.sixel_size(b'\x1bP0;0;0q"1;1;640;360#0;2;0;0;0'), (640, 360))
-
     def test_theme_falls_back_to_defaults(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'colors.toml'
@@ -111,6 +108,92 @@ class Terminal(unittest.TestCase):
             theme = c.load_theme(path)
         self.assertEqual(theme['accent'], '#ff8800')
         self.assertEqual(theme['background'], c.DEFAULT_THEME['background'])
+
+
+class Interface(unittest.TestCase):
+    """Drives the app the way the keyboard does, with state kept in a temporary folder."""
+
+    ITEMS = [
+        {'id': 'film-a', 'title': 'Alpha', 'kind': 'watch', 'tag': 'Space', 'seconds': 1800, 'meta': '30 min'},
+        {'id': 'film-b', 'title': 'Beta', 'kind': 'watch', 'tag': 'History', 'seconds': 3600, 'meta': '1 h'},
+        {'id': 'mag', 'title': 'Monthly', 'kind': 'read', 'tag': 'Magazine', 'meta': '50 pages'},
+        {'id': 'game', 'title': 'Tested Game', 'kind': 'atari', 'verified': True},
+        {'id': 'risky', 'title': 'Untested Game', 'kind': 'atari', 'verified': False},
+    ]
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        root = Path(self.dir.name)
+        self.saved = (c.HISTORY, c.STATE, c.WATCH_LATER)
+        c.HISTORY, c.STATE, c.WATCH_LATER = root / 'history.json', root / 'state.json', [root / 'watch_later']
+        self.addCleanup(lambda: setattr(c, 'HISTORY', self.saved[0]))
+        self.addCleanup(lambda: setattr(c, 'STATE', self.saved[1]))
+        self.addCleanup(lambda: setattr(c, 'WATCH_LATER', self.saved[2]))
+        self.app = c.App([dict(i) for i in self.ITEMS], art=False)
+
+    def keys(self, *keys):
+        for key in keys:
+            self.assertTrue(self.app.on_key(key))
+
+    def titles(self):
+        return [i['title'] for i in self.app.visible()]
+
+    def test_home_lists_films_then_reading(self):
+        self.assertEqual(self.titles(), ['Alpha', 'Beta', 'Monthly'])
+
+    def test_arrows_browse_and_change_section(self):
+        self.keys('right', 'down')
+        self.assertEqual(c.SECTIONS[self.app.section][0], 'watch')
+        self.assertEqual(self.app.selected, 0)
+        self.keys('up', 'up')
+        self.assertEqual(c.SECTIONS[self.app.section][0], 'plan')
+
+    def test_untested_games_are_hidden_until_asked_for(self):
+        self.app.section = [k for k, _ in c.SECTIONS].index('atari')
+        self.assertEqual(self.titles(), ['Tested Game'])
+        self.keys('u')
+        self.assertEqual(self.titles(), ['Tested Game', 'Untested Game'])
+
+    def test_search_from_home_covers_everything_and_q_is_text(self):
+        self.keys('/', 'g', 'a', 'm', 'e', 'enter')
+        self.assertEqual(self.titles(), ['Tested Game'])
+        self.keys('esc')
+        self.assertEqual(self.titles(), ['Alpha', 'Beta', 'Monthly'])
+        self.keys('/', 'q')
+        self.assertEqual(self.app.query, 'q')
+
+    def test_favourite_is_saved_and_shared_file_keeps_other_keys(self):
+        c.save_json(c.HISTORY, {'favorites': [], 'recent': ['x'], 'other': 1})
+        self.app.recent = ['x']
+        self.keys('f')
+        saved = c.load_json(c.HISTORY, {})
+        self.assertEqual(saved['favorites'], ['film-a'])
+        self.assertEqual(saved['other'], 1)
+
+    def test_planner_prompt(self):
+        self.keys('p', '0', ':', '4', '0', 'enter')
+        self.assertEqual(c.SECTIONS[self.app.section][0], 'plan')
+        self.assertEqual(self.titles(), ['Alpha'])
+        self.keys('p', 'x', 'enter')
+        self.assertIn('not a flight time', self.app.message)
+
+    def test_quit(self):
+        self.assertFalse(self.app.on_key('q'))
+
+    def test_every_section_draws_at_several_sizes(self):
+        import io
+
+        class Screen(io.StringIO):
+            buffer = io.BytesIO()
+
+        for size in [(200, 60, 12, 24), (112, 34, 10, 20), (80, 24, 10, 20), (40, 10, 10, 20)]:
+            self.app.geometry = lambda size=size: size
+            for section in range(len(c.SECTIONS)):
+                self.app.section, self.app.help = section, section % 2 == 0
+                screen = Screen()
+                self.app.draw(screen)
+                self.assertIn('\x1b[?2026l', screen.getvalue())
 
 
 if __name__ == '__main__':

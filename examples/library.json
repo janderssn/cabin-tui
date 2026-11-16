@@ -1,0 +1,54 @@
+[
+  {
+    "id": "video-apollo-13",
+    "title": "Apollo 13: Home Safe",
+    "subtitle": "NASA · Spaceflight",
+    "kind": "watch",
+    "tag": "Space",
+    "description": "Astronauts and flight controllers revisit the mission with original footage.",
+    "path": "/home/you/videos/flight/apollo-13-home-safe.mkv",
+    "image": "/home/you/.local/share/cabin/assets/apollo-13.jpg",
+    "meta": "29 min",
+    "seconds": 1787,
+    "bytes": 100604139
+  },
+  {
+    "id": "mag-air-space",
+    "title": "Air & Space Forces",
+    "subtitle": "July / August 2025",
+    "kind": "read",
+    "tag": "Magazine",
+    "description": "A complete issue, stored locally.",
+    "path": "/home/you/magazines/flight/air-space-jul-aug-2025.pdf",
+    "image": "/home/you/.local/share/cabin/assets/air-space.png",
+    "meta": "56 pages",
+    "bytes": 13749572
+  },
+  {
+    "id": "puzzle-net",
+    "title": "Net",
+    "subtitle": "Simon Tatham's Puzzle Collection",
+    "kind": "puzzles",
+    "tag": "Logic",
+    "description": "Rotate tiles to connect the network.",
+    "path": "/usr/bin/puzzles-net",
+    "image": "/home/you/.local/share/cabin/assets/puzzle-net.png",
+    "meta": "Quick play"
+  },
+  {
+    "id": "atari-example",
+    "title": "Example Game",
+    "subtitle": "Atari ST · Hatari",
+    "kind": "atari",
+    "tag": "Retro",
+    "description": "A two-disk game started from its first disk.",
+    "path": "/home/you/games/atari-st/example/disk-a.st",
+    "image": "/home/you/.local/share/cabin/assets/atari-example.png",
+    "meta": "Atari ST",
+    "folder": "example",
+    "disks": ["/home/you/games/atari-st/example/disk-a.st", "/home/you/games/atari-st/example/disk-b.st"],
+    "rom": "/home/you/.local/share/emutos/etos192uk.img",
+    "verified": true,
+    "notes": "Press 1 at the boot menu."
+  }
+]
