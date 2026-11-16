@@ -10,10 +10,11 @@ cat > "$HOME/.local/share/applications/cabin-tui.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Cabin TUI
-Comment=Offline flight entertainment in a terminal
-Exec=$HOME/.local/bin/cabin-tui
+Comment=Offline flight entertainment, big-screen terminal view
+Exec=$HOME/.local/bin/cabin-tui --window
 Icon=cabin
-Terminal=true
+Terminal=false
+StartupWMClass=cabin-tui
 Categories=Game;AudioVideo;Viewer;
 Keywords=flight;offline;travel;games;magazines;documentaries;terminal;
 DESKTOP

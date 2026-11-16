@@ -90,5 +90,28 @@ class Progress(unittest.TestCase):
         self.assertTrue(any('Unfinished download' in p for p in problems))
 
 
+class Terminal(unittest.TestCase):
+    def test_keys_are_split_from_escape_sequences(self):
+        self.assertEqual(c.parse_keys('\x1b[C\x1bOBa\r\x1b[5~\x1b'), ['right', 'down', 'a', 'enter', 'pgup', 'esc'])
+
+    def test_terminal_replies_are_not_typed_as_text(self):
+        self.assertEqual(c.parse_keys('\x1b[?62;4;22cq'), ['q'])
+
+    def test_titles_cannot_make_imagemagick_read_files(self):
+        self.assertEqual(c.caption_text('@/etc/passwd'), '\\@/etc/passwd')
+        self.assertEqual(c.caption_text('100% Pure'), '100%% Pure')
+
+    def test_sixel_size_is_read_from_the_header(self):
+        self.assertEqual(c.sixel_size(b'\x1bP0;0;0q"1;1;640;360#0;2;0;0;0'), (640, 360))
+
+    def test_theme_falls_back_to_defaults(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'colors.toml'
+            path.write_text('accent = "#FF8800"\nnonsense = 3\n')
+            theme = c.load_theme(path)
+        self.assertEqual(theme['accent'], '#ff8800')
+        self.assertEqual(theme['background'], c.DEFAULT_THEME['background'])
+
+
 if __name__ == '__main__':
     unittest.main()

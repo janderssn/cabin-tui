@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """Cabin TUI: offline flight entertainment in a terminal.
 
-Reads the catalogue the Cabin desktop app uses and opens films in mpv,
+A big-screen view: artwork, large titles and a shelf of cards. Reads the catalogue the Cabin desktop app uses and opens films in mpv,
 magazines in Evince, puzzles natively and Atari ST games in Hatari.
 Python standard library only; nothing here touches the network.
 """
 import argparse
-import curses
+import fcntl
 import hashlib
 import json
-import locale
 import os
 from pathlib import Path
+import queue
+import re
+import select
 import shutil
+import signal
+import struct
 import subprocess
 import sys
+import termios
 import textwrap
+import threading
 import time
+import tty
 
 HOME = Path.home()
 XDG_STATE = Path(os.environ.get('XDG_STATE_HOME', str(HOME / '.local/state')))
@@ -28,6 +35,9 @@ WATCH_LATER = [XDG_STATE / 'mpv' / 'watch_later', HOME / '.config/mpv/watch_late
 ATARI_ROOT = HOME / 'games/atari-st'
 
 MPV, EVINCE, HATARI = '/usr/bin/mpv', '/usr/bin/evince', '/usr/bin/hatari'
+MAGICK, FOOT = '/usr/bin/magick', '/usr/bin/foot'
+CACHE = Path(os.environ.get('XDG_CACHE_HOME', str(HOME / '.cache'))) / 'cabin-tui'   # prepared pictures
+TITLE_FONT = '/usr/share/fonts/liberation/LiberationSans-Bold.ttf'
 PLAYERS = {'watch': MPV, 'listen': MPV, 'read': EVINCE, 'atari': HATARI}
 
 # Hardware decoding saves battery; levelled audio and subtitles help over
@@ -39,8 +49,9 @@ SECTIONS = [('home', 'Home'), ('watch', 'Watch'), ('read', 'Read'), ('puzzles', 
             ('atari', 'Atari'), ('favorites', 'Favorites'), ('recent', 'Recent'), ('plan', 'Plan')]
 
 HELP = [
-    ('Left / Right, Tab', 'Change section'),
-    ('Up / Down, PgUp / PgDn', 'Move through the list'),
+    ('Left / Right', 'Browse the shelf'),
+    ('Up / Down, Tab', 'Change section'),
+    ('PgUp / PgDn, Home / End', 'Jump along the shelf'),
     ('Enter', 'Watch, read or play'),
     ('/', 'Search; Enter keeps it, Esc clears it'),
     ('t', 'Cycle topic filter'),
@@ -48,7 +59,7 @@ HELP = [
     ('w', 'Mark a film watched or unwatched'),
     ('p', 'Plan a line-up for the flight time'),
     ('u', 'Show or hide untested Atari games'),
-    ('d / J', 'Atari: next boot disk / joystick on arrows'),
+    ('d / J', 'Atari: next boot disk / arrow-key joystick'),
     ('r', 'Reload the catalogue'),
     ('q', 'Quit'),
 ]
@@ -257,10 +268,169 @@ def parse_duration(text):
         return None
 
 
+# ------------------------------------------------------------------ artwork
+
+def sixel_size(data):
+    """(width, height) in pixels from a sixel image's raster attributes, or None."""
+    match = re.search(rb'"\d+;\d+;(\d+);(\d+)', data[:200])
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def caption_text(text):
+    """Make a title safe for ImageMagick's caption: (no file reads, no % escapes)."""
+    text = text.replace('\\', '\\\\').replace('%', '%%')
+    return '\\' + text if text.startswith('@') else text
+
+
+class Art:
+    """Turns artwork and titles into sixel images with ImageMagick, off the UI thread.
+
+    Results are cached on disk, so each picture is prepared once per size.
+    """
+
+    def __init__(self, wake, enabled=True):
+        self.enabled = enabled and Path(MAGICK).is_file()
+        self.wake, self.ready, self.pending, self.failed = wake, {}, set(), set()
+        self.jobs = queue.Queue()
+        if self.enabled:
+            for _ in range(3):
+                threading.Thread(target=self.work, daemon=True).start()
+
+    def get(self, mode, source, w, h, bg='#000000', fg='#ffffff', size=0):
+        """Sixel bytes, or None while the picture is being prepared (or cannot be)."""
+        if not self.enabled or not source or w < 8 or h < 8:
+            return None
+        stamp = 0
+        if mode != 'title':
+            try:
+                stamp = Path(source).stat().st_mtime_ns
+            except OSError:
+                return None
+        key = hashlib.sha1(repr((mode, source, stamp, w, h, bg, fg, size)).encode()).hexdigest()
+        if key in self.ready:
+            return self.ready[key]
+        if key in self.failed:
+            return None
+        cached = CACHE / (key + '.six')
+        try:
+            self.ready[key] = cached.read_bytes()
+            return self.ready[key]
+        except OSError:
+            pass
+        if key not in self.pending:
+            self.pending.add(key)
+            self.jobs.put((key, mode, source, w, h, bg, fg, size))
+        return None
+
+    def work(self):
+        while True:
+            key, mode, source, w, h, bg, fg, size = self.jobs.get()
+            box, data, stdin = f'{w}x{h}', None, None
+            if mode == 'title':
+                cmd = [MAGICK, '-background', bg, '-fill', fg, '-font', TITLE_FONT, '-pointsize', str(size),
+                       '-size', f'{w}x', 'caption:' + caption_text(source),
+                       '-gravity', 'NorthWest', '-extent', box, 'sixel:-']
+            else:
+                fit = ['-resize', box + '^'] if mode == 'cover' else ['-resize', box, '-background', bg]
+                # The picture goes in on stdin, so its file name is never parsed by ImageMagick.
+                cmd = [MAGICK, '-[0]', *fit, '-gravity', 'center', '-extent', box, 'sixel:-']
+            try:
+                if mode != 'title':
+                    stdin = open(source, 'rb')
+                out = subprocess.run(cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+                if out.returncode == 0 and out.stdout.startswith(b'\x1bP'):
+                    data = out.stdout
+                    CACHE.mkdir(parents=True, exist_ok=True)
+                    tmp = CACHE / (key + '.tmp')
+                    tmp.write_bytes(data)
+                    tmp.replace(CACHE / (key + '.six'))
+            except (OSError, subprocess.SubprocessError):
+                pass
+            finally:
+                if stdin:
+                    stdin.close()
+            if data:
+                self.ready[key] = data
+            else:
+                self.failed.add(key)
+            self.pending.discard(key)
+            try:
+                os.write(self.wake, b'x')
+            except OSError:
+                pass
+
+
+# -------------------------------------------------------------------- theme
+
+DEFAULT_THEME = {'background': '#12151c', 'darker_background': '#0b0d12', 'lighter_background': '#1e2430',
+                 'selection': '#2a3142', 'foreground': '#c8cede', 'bright_foreground': '#eef1f7',
+                 'dark_foreground': '#7c869c', 'accent': '#7aa2f7', 'green': '#9ece6a', 'yellow': '#e0af68'}
+
+
+def load_theme(path=None):
+    """Colours from the current Omarchy theme, with defaults for anything missing."""
+    colours = dict(DEFAULT_THEME)
+    try:
+        text = Path(path or HOME / '.local/state/omarchy/current/theme/colors.toml').read_text()
+    except OSError:
+        text = ''
+    for line in text.splitlines():
+        match = re.match(r'\s*([a-z_]+)\s*=\s*"(#[0-9a-fA-F]{6})"', line)
+        if match and match.group(1) in colours:
+            colours[match.group(1)] = match.group(2).lower()
+    return colours
+
+
+def rgb(colour):
+    return int(colour[1:3], 16), int(colour[3:5], 16), int(colour[5:7], 16)
+
+
+def fit(text, width):
+    """Text cut to a width, with an ellipsis when something was lost."""
+    text = str(text)
+    if width <= 0:
+        return ''
+    return text if len(text) <= width else text[:width - 1] + '…'
+
+
+KEYS = {'[A': 'up', '[B': 'down', '[C': 'right', '[D': 'left', 'OA': 'up', 'OB': 'down', 'OC': 'right',
+        'OD': 'left', '[5~': 'pgup', '[6~': 'pgdn', '[H': 'home', '[F': 'end', '[1~': 'home', '[4~': 'end',
+        'OH': 'home', 'OF': 'end', '[Z': 'btab'}
+SEQUENCE = re.compile(r'\x1b(\[[0-9;?]*[A-Za-z~]|O[A-Z])')
+
+
+def parse_keys(text):
+    """Split terminal input into key names ('left', 'enter', 'esc') and typed characters."""
+    keys, i = [], 0
+    while i < len(text):
+        char = text[i]
+        if char == '\x1b':
+            match = SEQUENCE.match(text, i)
+            if match:
+                if match.group(1) in KEYS:
+                    keys.append(KEYS[match.group(1)])
+                i = match.end()
+                continue
+            keys.append('esc')
+        elif char in '\r\n':
+            keys.append('enter')
+        elif char == '\t':
+            keys.append('tab')
+        elif char in '\x7f\b':
+            keys.append('backspace')
+        elif char.isprintable():
+            keys.append(char)
+        i += 1
+    return keys
+
+
 # ----------------------------------------------------------------------- UI
 
+ACTIONS = {'watch': 'WATCH NOW', 'listen': 'LISTEN NOW', 'read': 'READ NOW'}
+
+
 class App:
-    def __init__(self, items):
+    def __init__(self, items, art=True):
         self.items = items
         history = load_json(HISTORY, {})
         self.favorites = set(history.get('favorites', []))
@@ -269,10 +439,11 @@ class App:
         self.watched = set(state.get('watched', []))
         self.show_untested = bool(state.get('show_untested', False))
         self.section, self.selected, self.top = 0, 0, 0
-        self.query, self.topic, self.searching = '', '', False
+        self.query, self.topic, self.mode, self.entry = '', '', '', ''
         self.disk_index, self.joystick = 0, False
         self.plan_minutes, self.plan_rows, self.plan_used = 0, [], 0
         self.message, self.help = '', False
+        self.want_art, self.art, self.theme = art, None, load_theme()
         self.refresh_progress()
 
     # -- state
@@ -329,32 +500,29 @@ class App:
         return rows
 
     def status(self, item):
-        """Short right-hand column: progress for films, size for the rest."""
+        """Short second line of a card: progress for films, size for the rest."""
         if item.get('kind') == 'watch' and item.get('seconds'):
             position, watched = self.progress.get(item['id'], (None, False))
             if watched:
-                return 'watched'
+                return 'Watched'
             if position:
                 return f'{minutes(max(0, item["seconds"] - position))} left'
         return str(item.get('meta', ''))
 
     # -- actions
 
-    def launch(self, item):
+    def launch(self, item, out=None):
         try:
             cmd, work = command_for(item, self.disk_index, self.joystick)
             if not Path(cmd[0]).is_file():
                 raise FileNotFoundError(f'Not installed: {cmd[0]}')
             log_path = (work or STATE.parent) / ('hatari.log' if work else 'launch.log')
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            curses.def_prog_mode()
-            curses.endwin()
-            print(f'\n  {item["title"]} is open. Close it to come back to Cabin.\n', flush=True)
-            try:
-                with log_path.open('a') as log:
-                    code = subprocess.run(cmd, cwd=work, stdout=log, stderr=log).returncode
-            finally:
-                curses.reset_prog_mode()
+            if out:
+                self.message = f'{item["title"]} is open. Close it to come back to Cabin.'
+                self.draw(out)
+            with log_path.open('a') as log:
+                code = subprocess.run(cmd, cwd=work, stdin=subprocess.DEVNULL, stdout=log, stderr=log).returncode
             self.recent = [item['id']] + [r for r in self.recent if r != item['id']]
             if item.get('kind') == 'watch':
                 # mpv keeps a resume file unless the film ran to its end.
@@ -375,169 +543,242 @@ class App:
 
     # -- drawing
 
-    def draw(self, scr):
-        h, w = scr.getmaxyx()
-        scr.erase()
-        if h < 12 or w < 50:
-            scr.addnstr(0, 0, 'Cabin needs a larger terminal (50 x 12).', max(1, w - 1))
-            scr.refresh()
+    def geometry(self):
+        """(columns, rows, cell width px, cell height px) of the terminal."""
+        try:
+            rows, cols, xpx, ypx = struct.unpack('HHHH', fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b'\0' * 8))
+        except OSError:
+            rows, cols, xpx, ypx = 24, 80, 0, 0
+        if not (xpx and ypx and cols and rows):
+            return cols or 80, rows or 24, 10, 20
+        return cols, rows, xpx // cols, ypx // rows
+
+    def draw(self, out):
+        W, H, cw, ch = self.geometry()
+        t = self.theme
+        bg, deep, card, sel = t['background'], t['darker_background'], t['lighter_background'], t['selection']
+        text, bright, dim, accent = t['foreground'], t['bright_foreground'], t['dark_foreground'], t['accent']
+        buf, images = [], []
+
+        def colour(fg=None, back=None, bold=False):
+            parts = ['0']
+            if bold:
+                parts.append('1')
+            if fg:
+                parts.append('38;2;%d;%d;%d' % rgb(fg))
+            parts.append('48;2;%d;%d;%d' % rgb(back or bg))
+            return '\x1b[' + ';'.join(parts) + 'm'
+
+        def put(y, x, string, fg=text, back=None, bold=False, width=None):
+            room = min(W - x, width if width is not None else W)
+            if 0 <= y < H and x >= 0 and room > 0:
+                buf.append(f'\x1b[{y + 1};{x + 1}H{colour(fg, back, bold)}{str(string)[:room]}')
+
+        def fill(y, x, w, h, back):
+            for row in range(y, y + h):
+                put(row, x, ' ' * w, None, back)
+
+        def picture(y, x, cols, rows, mode, source, back, **more):
+            """Queue a picture for cell box (cols x rows); True when it is ready."""
+            if not self.art or self.help:
+                return False
+            data = self.art.get(mode, source, cols * cw, rows * ch, bg=back, **more)
+            if data:
+                images.append((y, x, data))
+            return bool(data)
+
+        buf.append('\x1b[?2026h' + colour(text) + '\x1b[2J')
+        if W < 80 or H < 24:
+            put(1, 2, 'Cabin needs a larger window (80 x 24).', bright, bold=True)
+            out.write(''.join(buf) + '\x1b[?2026l')
+            out.flush()
             return
-        accent, dim = curses.color_pair(1), curses.color_pair(2)
 
-        def put(y, x, text, style=0, width=None):
-            room = w - x - 1 if width is None else min(width, w - x - 1)
-            if 0 <= y < h and room > 0:
-                try:
-                    scr.addnstr(y, x, text, room, style)
-                except curses.error:
-                    pass
+        margin = 3
+        rows = self.visible()
+        self.selected = max(0, min(self.selected, len(rows) - 1))
+        item = rows[self.selected] if rows else None
+        key, label = SECTIONS[self.section]
 
-        # Header: name on the left, clock and battery on the right.
-        put(0, 1, 'CABIN', accent | curses.A_BOLD)
-        put(0, 8, 'offline flight entertainment', dim)
+        # Top bar: name, sections, clock and battery.
+        put(1, margin, '✈  CABIN', accent, bold=True)
+        tabs_w = sum(len(name) + 4 for _, name in SECTIONS)
+        x = max(margin + 12, (W - tabs_w) // 2)
+        for n, (_, name) in enumerate(SECTIONS):
+            if n == self.section:
+                put(1, x, f'  {name}  ', deep, accent, bold=True)
+            else:
+                put(1, x, f'  {name}  ', dim)
+            x += len(name) + 4
         right = time.strftime('%H:%M')
         bat = battery()
         if bat:
             percent, status, hours = bat
-            right += f'   battery {percent}%'
-            if hours:
-                right += f', {minutes(hours * 3600)} left'
-            elif status == 'Charging':
-                right += ', charging'
-        put(0, max(40, w - len(right) - 2), right, dim)
+            right = (f'{minutes(hours * 3600)} left  ' if hours else 'charging  ' if status == 'Charging' else '') \
+                + f'{percent}%   ' + right
+        put(1, W - margin - len(right), right, dim)
 
-        x = 1
-        for n, (_, label) in enumerate(SECTIONS):
-            style = accent | curses.A_REVERSE | curses.A_BOLD if n == self.section else 0
-            put(2, x, f' {label} ', style)
-            x += len(label) + 3
+        # Shelf geometry first; the hero takes what is left above it.
+        card_w = max(18, min(30, (W - 2 * margin) // 5 - 2))
+        thumb_rows = max(3, round(card_w * cw * 9 / 16 / ch))
+        card_h = thumb_rows + 2
+        shelf_y = H - 2 - card_h
+        hero_y, hero_h = 3, shelf_y - 6
 
-        rows = self.visible()
-        self.selected = max(0, min(self.selected, len(rows) - 1))
-        key = SECTIONS[self.section][0]
-
-        # Filter line.
-        bits = []
-        if self.searching or self.query:
-            bits.append('Search: ' + self.query + ('_' if self.searching else ''))
-        if self.topic:
-            bits.append('Topic: ' + self.topic)
-        if key == 'plan':
-            bits.append(f'{minutes(self.plan_used)} of films for a {minutes(self.plan_minutes * 60)} flight'
-                        if self.plan_minutes else 'Press p and enter the flight time')
-        elif key == 'atari' and self.hidden_untested():
-            bits.append(f'{self.hidden_untested()} untested games hidden (u shows them)')
-        bits.append(f'{len(rows)} item' + ('' if len(rows) == 1 else 's'))
-        put(3, 1, '   '.join(bits), dim)
-
-        # List on the left, detail on the right.
-        list_w = max(30, min(60, w * 45 // 100))
-        body = h - 7
-        if self.selected < self.top:
-            self.top = self.selected
-        if self.selected >= self.top + body:
-            self.top = self.selected - body + 1
-        self.top = max(0, min(self.top, max(0, len(rows) - body)))
-        for n, item in enumerate(rows[self.top:self.top + body]):
-            index, y = self.top + n, 5 + n
-            mark = '*' if item['id'] in self.favorites else ' '
-            status = self.status(item)
-            title_w = list_w - len(status) - 5
-            title = item['title'] if len(item['title']) <= title_w else item['title'][:title_w - 1] + '…'
-            line = f' {mark} {title:<{title_w}} {status} '
-            put(y, 1, line, curses.A_REVERSE if index == self.selected else 0, list_w)
-        if not rows:
+        # Hero: artwork on the left, everything about the item on the right.
+        if item and hero_h >= 8:
+            kind = item.get('kind')
+            art_cols = min(int(W * 0.46), int(hero_h * ch * 16 / 9 / cw))
+            art_rows = min(hero_h, max(4, int(art_cols * cw * 9 / 16 / ch)))
+            fill(hero_y, margin, art_cols, art_rows, deep)
+            source = item.get('image', '')
+            if not picture(hero_y, margin, art_cols, art_rows, 'cover' if kind == 'watch' else 'contain', source, deep):
+                put(hero_y + art_rows // 2, margin + max(0, (art_cols - len(item['title'])) // 2),
+                    fit(item['title'], art_cols), dim, deep)
+            ix = margin + art_cols + 3
+            iw = W - ix - margin
+            y = hero_y
+            put(y, ix, fit(str(item.get('tag', '')).upper(), iw), accent, bold=True)
+            y += 2
+            # The title is drawn as a picture so it can be far larger than terminal text.
+            width_px = iw * cw
+            size = int(ch * 1.5)
+            if len(item['title']) * size * 0.55 > width_px * 2:
+                size = int(ch * 1.05)
+            # Two rows hold one line of that size; longer titles get four.
+            title_rows = 2 if len(item['title']) * size * 0.6 < width_px else 4
+            if not picture(y, ix, iw, title_rows, 'title', item['title'], bg, fg=bright, size=size):
+                for n, line in enumerate(textwrap.wrap(item['title'], iw)[:2]):
+                    put(y + n, ix, line, bright, bold=True)
+            y += title_rows + 1
+            put(y, ix, fit(item.get('subtitle', ''), iw), text)
+            y += 2
+            facts = [str(item.get('meta', ''))]
+            if item.get('bytes'):
+                facts.append(f'{item["bytes"] / 1e6:.0f} MB')
+            if item['id'] in self.favorites:
+                facts.append('★ Favourite')
+            if kind == 'atari' and not item.get('verified'):
+                facts.append('Untested')
+            put(y, ix, fit('   ·   '.join(f for f in facts if f), iw), dim)
+            y += 1
+            if kind == 'watch' and item.get('seconds'):
+                position, watched = self.progress.get(item['id'], (None, False))
+                fraction = 1 if watched else min(1, (position or 0) / item['seconds'])
+                if fraction:
+                    bar_w = min(40, iw - 10)
+                    filled = max(1, int(round(bar_w * fraction)))
+                    y += 1
+                    put(y, ix, '━' * filled, accent)
+                    put(y, ix + filled, '━' * (bar_w - filled), sel)
+                    put(y, ix + bar_w + 2, 'Watched' if watched else self.status(item), dim)
+                    y += 1
+            y += 1
+            notes = []
+            if kind == 'atari':
+                disks = item.get('disks', [])
+                if len(disks) > 1:
+                    notes.append(f'Boot disk {Path(disks[self.disk_index % len(disks)]).name} of {len(disks)}  (d changes it)')
+                notes.append('Joystick on arrow keys + right Ctrl: ' + ('on' if self.joystick else 'off') + '  (J)')
+                notes += [str(item.get('notes', ''))] if item.get('notes') else []
+                notes.append('In Hatari: F12 settings, Right Alt+M frees the mouse.')
+            elif kind == 'watch':
+                notes.append('Space pauses, arrows seek, q quits and keeps your place.')
+            bottom = hero_y + hero_h
+            note_lines = [line for note in notes for line in textwrap.wrap(note, iw)]
+            room = bottom - y - 3 - len(note_lines)
+            for line in textwrap.wrap(str(item.get('description', '')), min(iw, 76))[:max(0, room)]:
+                put(y, ix, line, text)
+                y += 1
+            y += 1
+            if y < bottom:
+                action = ACTIONS.get(kind, 'PLAY NOW')
+                put(y, ix, f'   ▶  {action}   ', deep, accent, bold=True)
+                put(y, ix + len(action) + 12, 'Enter', dim)
+                y += 2
+            for line in note_lines:
+                if y < bottom:
+                    put(y, ix, line, dim)
+                    y += 1
+        elif not item:
             empty = {'favorites': 'Press f on anything to keep it here.',
                      'recent': 'What you open will appear here.',
-                     'plan': 'Nothing fits yet. Press p to plan a flight.'}.get(key, 'Nothing matches.')
-            put(6, 3, empty, dim)
+                     'plan': 'Press p and enter your flight time to get a line-up that fits.'}.get(key, 'Nothing matches.')
+            put(hero_y + 3, margin, empty, bright, bold=True)
 
+        # Shelf heading with whatever is filtering it.
+        bits = [label.upper()]
+        if self.query or self.mode == 'search':
+            bits.append('Search: ' + (self.entry if self.mode == 'search' else self.query) + ('▏' if self.mode == 'search' else ''))
+        if self.topic:
+            bits.append('Topic: ' + self.topic)
+        if key == 'plan' and self.plan_minutes:
+            bits.append(f'{minutes(self.plan_used)} of films for a {minutes(self.plan_minutes * 60)} flight')
+        if key == 'atari' and self.hidden_untested():
+            bits.append(f'{self.hidden_untested()} untested hidden (u)')
+        put(shelf_y - 2, margin, fit('   ·   '.join(bits), W - 2 * margin - 12), bright, bold=True)
         if rows:
-            self.draw_detail(put, rows[self.selected], list_w + 3, w - list_w - 5, body, accent, dim)
+            count = f'{self.selected + 1} / {len(rows)}'
+            put(shelf_y - 2, W - margin - len(count), count, dim)
 
-        hint = ('Type to search   Enter: keep   Esc: clear' if self.searching else
-                'Enter: open   /: search   f: favourite   p: plan   t: topic   ?: help   q: quit')
-        put(h - 2, 1, self.message, accent)
-        put(h - 1, 1, hint, dim)
+        # Shelf: a row of cards, scrolled so the chosen one is on screen.
+        n_cards = max(1, (W - 2 * margin + 2) // (card_w + 2))
+        if self.selected < self.top:
+            self.top = self.selected
+        if self.selected >= self.top + n_cards:
+            self.top = self.selected - n_cards + 1
+        self.top = max(0, min(self.top, max(0, len(rows) - n_cards)))
+        x0 = max(margin, (W - (n_cards * (card_w + 2) - 2)) // 2)
+        for n, entry in enumerate(rows[self.top:self.top + n_cards]):
+            x, chosen = x0 + n * (card_w + 2), self.top + n == self.selected
+            back, fg = (accent, deep) if chosen else (card, text)
+            if chosen:
+                put(shelf_y - 1, x, '▄' * card_w, accent)
+            fill(shelf_y, x, card_w, thumb_rows, deep)
+            mode = 'cover' if entry.get('kind') == 'watch' else 'contain'
+            if not picture(shelf_y, x, card_w, thumb_rows, mode, entry.get('image', ''), deep):
+                put(shelf_y + thumb_rows // 2, x + 1, fit(entry['title'], card_w - 2), dim, deep)
+            star = '★ ' if entry['id'] in self.favorites else ''
+            put(shelf_y + thumb_rows, x, ' ' + fit(star + entry['title'], card_w - 2).ljust(card_w - 1), fg, back, bold=True)
+            put(shelf_y + thumb_rows + 1, x, ' ' + fit(self.status(entry), card_w - 2).ljust(card_w - 1),
+                deep if chosen else dim, back)
+        if self.top > 0:
+            put(shelf_y + thumb_rows // 2, max(0, x0 - 2), '‹', accent, bold=True)
+        if self.top + n_cards < len(rows):
+            put(shelf_y + thumb_rows // 2, min(W - 1, x0 + n_cards * (card_w + 2) - 1), '›', accent, bold=True)
+
+        # Footer: one line for a prompt or message, else the keys.
+        if self.mode == 'plan':
+            put(H - 1, margin, 'Flight time (3:10, 3h10 or 190): ' + self.entry + '▏', bright, bold=True)
+        elif self.mode == 'search':
+            put(H - 1, margin, 'Type to search     Enter keep     Esc clear', dim)
+        elif self.message:
+            put(H - 1, margin, fit(self.message, W - 2 * margin), accent, bold=True)
+        else:
+            put(H - 1, margin, fit('←  → browse     ↑  ↓ section     Enter open     / search     f favourite     '
+                                   'p plan     ? help     q quit', W - 2 * margin), dim)
+
         if self.help:
-            self.draw_help(scr, h, w, accent)
-        scr.refresh()
+            box_w, box_h = min(W - 8, 74), len(HELP) + 4
+            top, left = max(1, (H - box_h) // 2), (W - box_w) // 2
+            fill(top, left, box_w, box_h, card)
+            put(top + 1, left + 3, 'KEYS', accent, card, bold=True)
+            for n, (keys, what) in enumerate(HELP):
+                put(top + 3 + n, left + 3, f'{keys:<26}', bright, card, bold=True)
+                put(top + 3 + n, left + 30, fit(what, box_w - 33), text, card)
 
-    def draw_detail(self, put, item, x, width, height, accent, dim):
-        if width < 20:
-            return
-        y = 5
-        put(y, x, str(item.get('tag', '')).upper(), accent)
-        put(y + 1, x, item['title'], curses.A_BOLD, width)
-        put(y + 2, x, str(item.get('subtitle', '')), dim, width)
-        y += 4
-        kind = item.get('kind')
-        facts = [str(item.get('meta', ''))]
-        if item.get('bytes'):
-            facts.append(f'{item["bytes"] / 1e6:.0f} MB')
-        put(y, x, '  ·  '.join(f for f in facts if f), 0, width)
-        y += 1
-        if kind == 'watch' and item.get('seconds'):
-            position, watched = self.progress.get(item['id'], (None, False))
-            fraction = 1 if watched else min(1, (position or 0) / item['seconds'])
-            bar_w = min(30, width - 12)
-            filled = int(round(bar_w * fraction))
-            put(y, x, '#' * filled + '-' * (bar_w - filled), accent)
-            put(y, x + bar_w + 1, 'watched' if watched else f'{int(fraction * 100)}%', dim)
-            y += 1
-        y += 1
-        for line in textwrap.wrap(str(item.get('description', '')), width)[:max(0, height - 14)]:
-            put(y, x, line, 0, width)
-            y += 1
-        y += 1
-        notes = []
-        if kind == 'atari':
-            disks = item.get('disks', [])
-            if disks:
-                notes.append(f'Boot disk: {Path(disks[self.disk_index % len(disks)]).name} ({len(disks)} disk(s), d changes it)')
-            notes.append('Joystick on arrow keys + right Ctrl: ' + ('on' if self.joystick else 'off') + ' (J toggles)')
-            if not item.get('verified'):
-                notes.append('Untested: this copy has not been boot-checked.')
-            notes += textwrap.wrap(str(item.get('notes', '')), width)
-            notes.append('In Hatari: F11 fullscreen, F12 settings, Right Alt+M frees the mouse.')
-        elif kind == 'watch':
-            notes.append('Opens fullscreen in mpv. Space pauses, arrows seek, q quits and keeps your place.')
-        elif kind == 'read':
-            notes.append('Opens in Document Viewer.')
-        elif kind == 'puzzles':
-            notes.append('A new puzzle every time; rules are in its Help menu.')
-        for note in notes:
-            for line in textwrap.wrap(note, width) or ['']:
-                if y < 5 + height:
-                    put(y, x, line, dim, width)
-                    y += 1
-
-    def draw_help(self, scr, h, w, accent):
-        box_w, box_h = min(w - 4, 72), min(h - 2, len(HELP) + 4)
-        top, left = (h - box_h) // 2, (w - box_w) // 2
-        win = scr.derwin(box_h, box_w, top, left)
-        win.erase()
-        win.box()
-        win.addnstr(1, 2, 'Keys', box_w - 4, accent | curses.A_BOLD)
-        for n, (keys, what) in enumerate(HELP[:box_h - 4]):
-            win.addnstr(3 + n, 2, f'{keys:<26}{what}', box_w - 4)
+        out.write(''.join(buf))
+        for y, x, data in images:
+            out.write(f'\x1b[{y + 1};{x + 1}H')
+            out.flush()
+            out.buffer.write(data)
+            out.buffer.flush()
+        out.write('\x1b[0m\x1b[?2026l')
+        out.flush()
 
     # -- input
 
-    def prompt(self, scr, label):
-        h, w = scr.getmaxyx()
-        scr.move(h - 2, 0)
-        scr.clrtoeol()
-        scr.addnstr(h - 2, 1, label, w - 2)
-        curses.echo()
-        curses.curs_set(1)
-        try:
-            return scr.getstr(h - 2, len(label) + 1, 12).decode(errors='replace')
-        finally:
-            curses.noecho()
-            curses.curs_set(0)
-
-    def on_key(self, scr, key):
+    def on_key(self, key, out=None):
         """Handle one key. Returns False to quit."""
         self.message = ''
         rows = self.visible()
@@ -545,39 +786,57 @@ class App:
         if self.help:
             self.help = False
             return True
-        if self.searching:
-            if key in ('\n', '\r', curses.KEY_ENTER):
-                self.searching = False
-            elif key == '\x1b':
-                self.searching, self.query = False, ''
-            elif key in ('\x7f', '\b', curses.KEY_BACKSPACE):
-                self.query = self.query[:-1]
-            elif isinstance(key, str) and key.isprintable():
-                self.query += key
-            self.selected = 0
+        if self.mode:
+            if key == 'enter':
+                mode, self.mode = self.mode, ''
+                if mode == 'search':
+                    self.query = self.entry
+                else:
+                    total = parse_duration(self.entry)
+                    if total and total > 0:
+                        self.make_plan(total)
+                    else:
+                        self.message = 'That is not a flight time.'
+            elif key == 'esc':
+                if self.mode == 'search':
+                    self.query = ''
+                self.mode = ''
+            elif key == 'backspace':
+                self.entry = self.entry[:-1]
+            elif len(key) == 1:
+                self.entry += key
+            if self.mode == 'search':
+                self.query, self.selected = self.entry, 0
             return True
         if key in ('q', 'Q'):
             return False
-        page = max(1, scr.getmaxyx()[0] - 8)
-        if key in (curses.KEY_UP, 'k'):
+        page = 5
+        moved = True
+        if key in ('left', 'h'):
             self.selected -= 1
-        elif key in (curses.KEY_DOWN, 'j'):
+        elif key in ('right', 'l'):
             self.selected += 1
-        elif key == curses.KEY_PPAGE:
+        elif key == 'pgup':
             self.selected -= page
-        elif key == curses.KEY_NPAGE:
+        elif key == 'pgdn':
             self.selected += page
-        elif key in (curses.KEY_HOME, 'g'):
+        elif key in ('home', 'g'):
             self.selected = 0
-        elif key in (curses.KEY_END, 'G'):
+        elif key in ('end', 'G'):
             self.selected = len(rows) - 1
-        elif key in (curses.KEY_RIGHT, 'l', '\t'):
-            self.section, self.selected = (self.section + 1) % len(SECTIONS), 0
-        elif key in (curses.KEY_LEFT, 'h', curses.KEY_BTAB):
-            self.section, self.selected = (self.section - 1) % len(SECTIONS), 0
+        elif key in ('down', 'j', 'tab'):
+            self.section, self.selected, self.top = (self.section + 1) % len(SECTIONS), 0, 0
+        elif key in ('up', 'k', 'btab'):
+            self.section, self.selected, self.top = (self.section - 1) % len(SECTIONS), 0, 0
+        else:
+            moved = False
+        if moved:
+            self.disk_index = 0
         elif key == '/':
-            self.searching, self.query, self.selected = True, '', 0
-        elif key == '\x1b':
+            self.mode, self.entry, self.query, self.selected = 'search', '', '', 0
+        elif key == 'p':
+            self.mode, self.entry = 'plan', ''
+        elif key == 'esc':
             self.query, self.topic, self.selected = '', '', 0
         elif key == 't':
             options = [''] + self.topics()
@@ -591,16 +850,11 @@ class App:
         elif key == 'r':
             try:
                 self.items = load_library()
+                self.theme = load_theme()
                 self.refresh_progress()
                 self.message = f'Reloaded: {len(self.items)} items.'
             except (OSError, ValueError) as exc:
                 self.message = f'Could not reload: {exc}'
-        elif key == 'p':
-            total = parse_duration(self.prompt(scr, 'Flight time (3:10, 3h10 or 190): '))
-            if total and total > 0:
-                self.make_plan(total)
-            else:
-                self.message = 'That is not a flight time.'
         elif key == 'J':
             self.joystick = not self.joystick
         elif key in ('d', 'D'):
@@ -615,43 +869,65 @@ class App:
                 self.watched ^= {item['id']}
                 self.refresh_progress()
                 self.save()
-        elif item and key in ('\n', '\r', curses.KEY_ENTER):
-            self.launch(item)
-            scr.clear()
-        if key in (curses.KEY_UP, curses.KEY_DOWN, 'j', 'k', curses.KEY_PPAGE, curses.KEY_NPAGE,
-                   curses.KEY_HOME, curses.KEY_END, 'g', 'G'):
-            self.disk_index = 0
+        elif item and key == 'enter':
+            self.launch(item, out)
         return True
 
-    def run(self, scr):
-        curses.curs_set(0)
-        curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
-        curses.set_escdelay(25)
-        scr.keypad(True)
-        scr.timeout(30000)          # redraw the clock and battery now and then
-        while True:
-            self.draw(scr)
-            try:
-                key = scr.get_wch()
-            except curses.error:
-                continue
-            except KeyboardInterrupt:
-                return
-            if key == curses.KEY_RESIZE:
-                continue
-            if not self.on_key(scr, key):
-                return
+    def run(self):
+        fd, out = sys.stdin.fileno(), sys.stdout
+        wake_r, wake_w = os.pipe()
+        os.set_blocking(wake_w, False)
+        saved = termios.tcgetattr(fd)
+        signal.signal(signal.SIGWINCH, lambda *_: os.write(wake_w, b'x'))
+        try:
+            tty.setcbreak(fd)
+            out.write('\x1b[?1049h\x1b[?25l\x1b[c')      # own screen, no cursor, ask what the terminal can do
+            out.flush()
+            # Terminals that can draw sixel pictures say so with a 4 in their reply.
+            reply = os.read(fd, 256).decode(errors='replace') if select.select([fd], [], [], 0.4)[0] else ''
+            sixel = bool(re.search(r'\x1b\[\?[0-9;]*\b4\b[0-9;]*c', reply))
+            self.art = Art(wake_w, enabled=self.want_art and sixel)
+            pending = parse_keys(SEQUENCE.sub('', reply))
+            while True:
+                for key in pending:
+                    if not self.on_key(key, out):
+                        return
+                self.draw(out)
+                ready = select.select([fd, wake_r], [], [], 30)[0]    # the timeout keeps the clock fresh
+                pending = []
+                if wake_r in ready:
+                    os.read(wake_r, 4096)
+                if fd in ready:
+                    pending = parse_keys(os.read(fd, 1024).decode(errors='replace'))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            out.write('\x1b[0m\x1b[?25h\x1b[?1049l')
+            out.flush()
+
+
+def open_window():
+    """Reopen Cabin in its own fullscreen terminal with large type."""
+    if not Path(FOOT).is_file():
+        raise SystemExit('The big-screen window needs the foot terminal; run cabin-tui in any terminal instead.')
+    size = os.environ.get('CABIN_TUI_FONT_SIZE', '15')
+    os.execv(FOOT, [FOOT, '--app-id=cabin-tui', '--title=Cabin', '--fullscreen',
+                    f'--font=monospace:size={size}', '--override=pad=0x0',
+                    sys.executable, str(Path(__file__).resolve())])
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='cabin-tui', description=__doc__.splitlines()[0])
+    parser.add_argument('--window', action='store_true', help='open in its own fullscreen window with large type')
+    parser.add_argument('--no-art', action='store_true', help='text only, no pictures')
     parser.add_argument('--list', action='store_true', help='list the catalogue')
     parser.add_argument('--check', action='store_true', help='check players and files before a flight')
     parser.add_argument('--plan', metavar='TIME', help='print a line-up for a flight, e.g. 3:10')
     parser.add_argument('--dry-run', metavar='ID', help='print the command an item would run')
     args = parser.parse_args(argv)
+    if args.window:
+        open_window()
     try:
         items = load_library()
     except (OSError, ValueError) as exc:
@@ -686,8 +962,7 @@ def main(argv=None):
     elif not (sys.stdin.isatty() and sys.stdout.isatty()):
         parser.error('Run cabin-tui in a terminal')
     else:
-        locale.setlocale(locale.LC_ALL, '')
-        curses.wrapper(App(items).run)
+        App(items, art=not args.no_art).run()
 
 
 if __name__ == '__main__':

@@ -1,39 +1,38 @@
 # Cabin TUI
 
-Offline flight entertainment in a terminal: films, magazines, puzzles and
-Atari ST games from one keyboard-driven list. It grew out of the `atari-games`
-launcher and is a second front end to the [Cabin](../cabin) desktop app: it
-reads the same catalogue and shares its favourites and recent list.
+Offline flight entertainment in a terminal, laid out like a console's big-screen
+mode: full-screen, large type, artwork for whatever is selected and a shelf of
+cards to browse with the arrow keys. Films, magazines, puzzles and Atari ST
+games in one place.
 
-```
- CABIN  offline flight entertainment                          09:26   battery 100%
-
-  Home   Watch   Read   Puzzles   Atari   Favorites   Recent   Plan
- 15 items
-
-    The Stuff of Dreams           1h 27m   SPACE
-    The Vietnam War               2h 07m   The Stuff of Dreams
-    Rome: Origins of an Empire    58 min   NASA JPL · Voyager
-```
-
-Python standard library only. Nothing in it uses the network.
+It grew out of the `atari-games` launcher and is a second front end to the
+[Cabin](../cabin) desktop app: it reads the same catalogue and shares its
+favourites and recent list. Python standard library only; nothing in it uses
+the network.
 
 ## Install and run
 
 ```sh
-bin/install     # links ~/.local/bin/cabin-tui and adds a launcher entry
-cabin-tui
+bin/install          # links ~/.local/bin/cabin-tui and adds a launcher entry
+cabin-tui --window   # its own fullscreen window with large type (what the launcher entry runs)
+cabin-tui            # in the terminal you are already in
 ```
 
 Needs Python 3.10 or later and, for what you actually open, `mpv`, `evince`,
 `hatari` and Simon Tatham's `puzzles`.
 
+Pictures and the large titles need a terminal that draws sixel images (foot
+does) and ImageMagick. Without them, or with `--no-art`, the same layout shows
+text only. `--window` uses foot; set `CABIN_TUI_FONT_SIZE` (default 15) to
+change how large everything is. Colours follow the current Omarchy theme.
+
 ## Keys
 
 | Key | Does |
 | --- | --- |
-| Left / Right, Tab | Change section |
-| Up / Down, PgUp / PgDn | Move through the list |
+| Left / Right | Browse the shelf |
+| Up / Down, Tab | Change section |
+| PgUp / PgDn, Home / End | Jump along the shelf |
 | Enter | Watch, read or play |
 | `/` | Search; from Home it searches everything |
 | `t` | Cycle the topic filter (Space, Roman history, ...) |
@@ -42,7 +41,7 @@ Needs Python 3.10 or later and, for what you actually open, `mpv`, `evince`,
 | `p` | Plan a line-up for the flight time |
 | `u` | Show or hide Atari games that were never boot-tested |
 | `d` / `J` | Atari: next boot disk / joystick on the arrow keys |
-| `r` | Reload the catalogue |
+| `r` | Reload the catalogue and theme |
 | `?` / `q` | Help / quit |
 
 ## What it does for a flight
@@ -79,6 +78,7 @@ or a download was left unfinished (`*.part`).
 | `~/.local/state/cabin/history.json` | Favourites and recent items, shared with the desktop app |
 | `~/.local/state/cabin-tui/state.json` | Watched films and the untested-games setting |
 | `~/.local/state/mpv/watch_later/` | mpv's resume positions, read for progress |
+| `~/.cache/cabin-tui/` | Pictures prepared for the terminal; safe to delete |
 | `~/.local/state/atari-games/` | Writable copies of the Atari disks; the originals are never changed |
 
 ## Tests
